@@ -25,6 +25,16 @@ import java.util.Random;
 import java.util.Scanner;
 
 public class onlineKMean {
+    public static double distance(LinkedList<Double> a, LinkedList<Double> b) {
+        double dist = 0.0;
+        for (int i = 0; i < a.size(); i++) {
+            double x = a.get(i);
+            double y = b.get(i);
+            dist += (x - y) * (x - y);
+        }
+        return Math.sqrt(dist);
+    }
+
     public static void main(String[] args) throws Exception {
         ParameterTool parameters = ParameterTool.fromArgs(args);
         StreamExecutionEnvironment see = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -39,7 +49,8 @@ public class onlineKMean {
 
         DataStream<String> raw = see.addSource(consumer);
 
-        DataStream<Tuple2<Integer, LinkedList<Double>>> parsed = raw.map(new MapFunction<String, Tuple2<Integer, LinkedList<Double>>>() {
+        DataStream<Tuple2<Integer, LinkedList<Double>>> parsed = raw.map(
+                new MapFunction<String, Tuple2<Integer, LinkedList<Double>>>() {
             @Override
             public Tuple2<Integer, LinkedList<Double>> map(String line) {
                 Scanner sc = new Scanner(line);
@@ -47,17 +58,6 @@ public class onlineKMean {
                 for (String number: line.split(",")) {
                     list.add(Double.parseDouble(number));
                 }
-                /*
-                while (true) {
-                    if (sc.hasNextDouble()) {
-                        list.add(sc.nextDouble());
-                    } else if (sc.hasNextInt()) {
-                        list.add(sc.nextInt() + 0.0);
-                    } else {
-                        break;
-                    }
-                }
-                */
                 Tuple2<Integer, LinkedList<Double>> tuple2 = new Tuple2<Integer, LinkedList<Double>>();
                 tuple2.f0 = 1;
                 tuple2.f1 = list;
@@ -66,11 +66,17 @@ public class onlineKMean {
         });
 
 
-        DataStream<Tuple2<LinkedList<Double>, Integer>> classified = parsed.keyBy(0).flatMap(new RichFlatMapFunction<Tuple2<Integer, LinkedList<Double>>, Tuple2<LinkedList<Double>, Integer>>() {
+        DataStream<Tuple2<LinkedList<Double>, Integer>> classified = parsed.keyBy(0).flatMap(
+                new RichFlatMapFunction<Tuple2<Integer, LinkedList<Double>>, Tuple2<LinkedList<Double>, Integer>>() {
             private transient ValueState<Tuple2<Integer, LinkedList<LinkedList<Double>>>> centroids;
-
+            private transient ValueState<Tuple2<Integer, Long>> counts;
+            private ParameterTool parameters; 
+            // private int numFeatures;
+            private int k;
             @Override
-            public void flatMap(Tuple2<Integer, LinkedList<Double>> input, Collector<Tuple2<LinkedList<Double>, Integer>> out) throws Exception {
+            public void flatMap(
+                    Tuple2<Integer, LinkedList<Double>> input, Collector<Tuple2<LinkedList<Double>, Integer>> out) 
+            throws Exception {
                 Tuple2<Integer, LinkedList<LinkedList<Double>>> curCentroids = centroids.value();
                 curCentroids.f1.add(input.f1);
                 centroids.update(curCentroids);
@@ -81,8 +87,23 @@ public class onlineKMean {
 
             @Override
             public void open(Configuration conf) {
-                ValueStateDescriptor<Tuple2<Integer, LinkedList<LinkedList<Double>>>> descriptor = new ValueStateDescriptor<Tuple2<Integer, LinkedList<LinkedList<Double>>>>("centroids", TypeInformation.of(new TypeHint<Tuple2<Integer, LinkedList<LinkedList<Double>>>>() {}), Tuple2.of(1, new LinkedList<LinkedList<Double>>()));
-                centroids = getRuntimeContext().getState(descriptor);
+                ValueStateDescriptor<Tuple2<Integer, LinkedList<LinkedList<Double>>>> descriptorCentroids = 
+                    new ValueStateDescriptor<Tuple2<Integer, LinkedList<LinkedList<Double>>>>(
+                            "centroids", 
+                            TypeInformation.of(new TypeHint<Tuple2<Integer, LinkedList<LinkedList<Double>>>>() {}), 
+                            Tuple2.of(1, new LinkedList<LinkedList<Double>>()));
+                
+                ValueStateDescriptor<Tuple2<Integer, Long>> descriptorCounts = 
+                    new ValueStateDescriptor<>(
+                            "counts", 
+                            TypeInformation.of(new TypeHint<Tuple2<Integer, Long>>() {}), 
+                            Tuple2.of(0, 0L));
+
+                centroids = getRuntimeContext().getState(descriptorCentroids);
+                counts = getRuntimeContext().getState(descriptorCounts);
+                // numFeatures = parameters.getRequired("numFeatures");
+                parameters = (ParameterTool) getRuntimeContext().getExecutionConfig().getGlobalJobParameters();
+                k = parameters.getInt("k");
             }
             
         }).setParallelism(2);
