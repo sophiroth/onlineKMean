@@ -20,6 +20,8 @@ import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer08;
 import org.apache.flink.streaming.util.serialization.SimpleStringSchema;
 
 import java.util.Properties;
+import java.util.Collections;
+import java.util.PriorityQueue;
 import java.util.LinkedList;
 import java.util.Random;
 import java.util.Scanner;
@@ -33,6 +35,30 @@ public class onlineKMean {
             dist += (x - y) * (x - y);
         }
         return Math.sqrt(dist);
+    }
+
+    public static double minDistance(LinkedList<Double> a, LinkedList<LinkedList<Double>> bs) {
+        double dist = Double.POSITIVE_INFINITY;
+        for (LinkedList<Double> b: bs) {
+            double curDistance = distance(a, b);
+            dist = dist < curDistance ? dist : curDistance;
+        }
+        return dist;
+    }
+
+    public static int minIndex(LinkedList<Double> a, LinkedList<LinkedList<Double>> bs) {
+        double dist = Double.POSITIVE_INFINITY;
+        int index = 0;
+        int curIndex = 0;
+        for (LinkedList<Double> b: bs) {
+            double curDistance = distance(a, b);
+            if (curDistance < dist) {
+                index = curIndex;
+                dist = curDistance;
+            }
+            curIndex++;
+        }
+        return index;
     }
 
     public static void main(String[] args) throws Exception {
@@ -72,17 +98,52 @@ public class onlineKMean {
             private transient ValueState<Tuple2<Integer, Long>> counts;
             private ParameterTool parameters; 
             // private int numFeatures;
+            private int kTarget;
             private int k;
+            private double w = -1;
+            private int q = 0;
+            private Random rand = new Random();
             @Override
             public void flatMap(
-                    Tuple2<Integer, LinkedList<Double>> input, Collector<Tuple2<LinkedList<Double>, Integer>> out) 
-            throws Exception {
-                Tuple2<Integer, LinkedList<LinkedList<Double>>> curCentroids = centroids.value();
-                curCentroids.f1.add(input.f1);
-                centroids.update(curCentroids);
-                LinkedList<Double> temp = new LinkedList<Double>();
-                out.collect(new Tuple2<LinkedList<Double>, Integer>(input.f1, 1));
-                centroids.clear();
+                    Tuple2<Integer, LinkedList<Double>> input, 
+                    Collector<Tuple2<LinkedList<Double>, Integer>> out) throws Exception {
+                long curCounts = counts.value().f1;
+                LinkedList<LinkedList<Double>> curCentroids = centroids.value().f1;
+                if (curCounts < kTarget + 10) {
+                    out.collect(new Tuple2<LinkedList<Double>, Integer>(input.f1, (int) curCounts));
+                    curCentroids.add(input.f1);
+                    curCounts++;
+                } else {
+                    if (w == -1) {
+                        w = 0;
+                        PriorityQueue<Double> heap = new PriorityQueue<Double>(10, Collections.reverseOrder());
+                        for (int i = 0; i < curCentroids.size(); i++) {
+                            for (int j = i + 1; j < curCentroids.size(); j++) {
+                                double dist = distance(curCentroids.get(i), curCentroids.get(j));
+                                heap.offer(dist * dist);
+                                if (heap.size() > 10) {
+                                    heap.poll();
+                                }
+                            }
+                        }
+                        while (!heap.isEmpty()) {
+                            w += heap.poll();
+                        }
+                        w /= 2;
+                    }
+                    if (rand.nextDouble() < Math.min(1, 
+                                minDistance(input.f1, curCentroids) * minDistance(input.f1, curCentroids) / w)) {
+                        curCentroids.add(input.f1);
+                        q++;
+                    }
+                    if (q >= k) {
+                        q = 0;
+                        w = 10 * w;
+                    }
+                    out.collect(new Tuple2<LinkedList<Double>, Integer>(input.f1, minIndex(input.f1, curCentroids)));
+                }
+                centroids.update(Tuple2.of(1, curCentroids));
+                counts.update(Tuple2.of(0, curCounts));
             }
 
             @Override
@@ -103,7 +164,8 @@ public class onlineKMean {
                 counts = getRuntimeContext().getState(descriptorCounts);
                 // numFeatures = parameters.getRequired("numFeatures");
                 parameters = (ParameterTool) getRuntimeContext().getExecutionConfig().getGlobalJobParameters();
-                k = parameters.getInt("k");
+                kTarget = parameters.getInt("k");
+                k = (kTarget - 11) / 5;
             }
             
         }).setParallelism(2);
